@@ -1,6 +1,6 @@
 use anyhow::Context;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table};
@@ -124,7 +124,10 @@ pub fn inspect_computer_use_in_home(home: &Path) -> ComputerUseStatusReport {
         .join(".codex-plugin")
         .join("plugin.json")
         .is_file();
-    let plugin_cache_exists = cache_latest.join(".codex-plugin").join("plugin.json").is_file();
+    let plugin_cache_exists = cache_latest
+        .join(".codex-plugin")
+        .join("plugin.json")
+        .is_file();
     let helper_transport_exists = helper_transport_path(&cache_latest).is_file();
     let user_environment_enabled = user_environment_enabled();
     let ready = marketplace_manifest_exists
@@ -178,25 +181,42 @@ pub fn repair_computer_use_in_home(
         .join("openai-bundled");
     let mut steps = Vec::new();
 
-    let bundled_source = resolve_bundled_marketplace_source(&home, options.bundled_source.as_deref());
+    let bundled_source =
+        resolve_bundled_marketplace_source(&home, options.bundled_source.as_deref());
+    let mut bundled_marketplace_synced = false;
     if let Some(source) = &bundled_source {
-        if !same_path(source, &marketplace_root) {
-            copy_dir_mirror(source, &marketplace_root)?;
-            steps.push(ok_step(
-                "syncBundledMarketplace",
-                format!(
-                    "已同步 openai-bundled marketplace：{}",
-                    source.to_string_lossy()
-                ),
-            ));
-        } else {
+        if same_path(source, &marketplace_root) {
+            bundled_marketplace_synced = true;
             steps.push(ok_step(
                 "syncBundledMarketplace",
                 "openai-bundled marketplace 已在本地镜像路径。".to_string(),
             ));
+        } else {
+            match copy_dir_mirror(source, &marketplace_root) {
+                Ok(()) => {
+                    bundled_marketplace_synced = true;
+                    steps.push(ok_step(
+                        "syncBundledMarketplace",
+                        format!(
+                            "已同步 openai-bundled marketplace：{}",
+                            source.to_string_lossy()
+                        ),
+                    ));
+                }
+                Err(error) => steps.push(warn_step(
+                    "syncBundledMarketplace",
+                    format!("openai-bundled marketplace 同步失败，将重建最小本地镜像：{error}"),
+                )),
+            }
         }
     } else {
-        anyhow::bail!("未找到 openai-bundled marketplace 源，无法安装 Computer Use");
+        steps.push(warn_step(
+            "syncBundledMarketplace",
+            "未找到可读 openai-bundled marketplace 源，将重建最小本地镜像。".to_string(),
+        ));
+    }
+    if !bundled_marketplace_synced {
+        std::fs::create_dir_all(marketplace_root.join("plugins"))?;
     }
 
     let plugin_source_root = marketplace_root.join("plugins").join("computer-use");
@@ -218,7 +238,8 @@ pub fn repair_computer_use_in_home(
         "已写入 computer-use compatibility plugin 和 cache/latest。".to_string(),
     ));
 
-    let marketplace_report = crate::marketplace_config::repair_local_marketplace_config_in_home(&home)?;
+    let marketplace_report =
+        crate::marketplace_config::repair_local_marketplace_config_in_home(&home)?;
     changed |= marketplace_report.changed;
     let marketplace_config_backup_path = marketplace_report.backup_path.clone();
     let configured_marketplaces = marketplace_report
@@ -256,7 +277,10 @@ pub fn repair_computer_use_in_home(
             changed = true;
             steps.push(ok_step(
                 "chromeNativeMessaging",
-                format!("已更新 Chrome native messaging manifest：{}", path.display()),
+                format!(
+                    "已更新 Chrome native messaging manifest：{}",
+                    path.display()
+                ),
             ));
         }
         Ok(None) => steps.push(skip_step(
@@ -340,23 +364,25 @@ pub fn repair_computer_use_in_home(
     })
 }
 
-fn resolve_bundled_marketplace_source(home: &Path, override_source: Option<&Path>) -> Option<PathBuf> {
+fn resolve_bundled_marketplace_source(
+    home: &Path,
+    override_source: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(source) = override_source.filter(|source| bundled_manifest_path(source).is_file()) {
         return Some(source.to_path_buf());
+    }
+
+    let existing = home
+        .join(".tmp")
+        .join("bundled-marketplaces")
+        .join("openai-bundled");
+    if bundled_manifest_path(&existing).is_file() {
+        return Some(existing);
     }
 
     installed_bundled_marketplace_root()
         .ok()
         .filter(|source| bundled_manifest_path(source).is_file())
-        .or_else(|| {
-            let existing = home
-                .join(".tmp")
-                .join("bundled-marketplaces")
-                .join("openai-bundled");
-            bundled_manifest_path(&existing)
-                .is_file()
-                .then_some(existing)
-        })
 }
 
 fn installed_bundled_marketplace_root() -> anyhow::Result<PathBuf> {
@@ -387,11 +413,16 @@ fn installed_bundled_marketplace_root() -> anyhow::Result<PathBuf> {
 }
 
 fn bundled_manifest_path(root: &Path) -> PathBuf {
-    root.join(".agents").join("plugins").join("marketplace.json")
+    root.join(".agents")
+        .join("plugins")
+        .join("marketplace.json")
 }
 
 fn write_computer_use_plugin_tree(root: &Path) -> anyhow::Result<()> {
-    write_json_file(&root.join(".codex-plugin").join("plugin.json"), &plugin_json())?;
+    write_json_file(
+        &root.join(".codex-plugin").join("plugin.json"),
+        &plugin_json(),
+    )?;
     write_text_file(
         &root.join("skills").join("computer-use").join("SKILL.md"),
         COMPUTER_USE_SKILL_MD,
@@ -606,7 +637,8 @@ fn update_codex_config(home: &Path) -> anyhow::Result<(bool, Option<String>)> {
 
     let before = doc.to_string();
     {
-        let plugin = nested_table_mut_or_insert(&mut doc, &["plugins", "computer-use@openai-bundled"])?;
+        let plugin =
+            nested_table_mut_or_insert(&mut doc, &["plugins", "computer-use@openai-bundled"])?;
         plugin["enabled"] = toml_edit::value(true);
     }
     {
@@ -659,7 +691,9 @@ fn verify_computer_use_paths(home: &Path, marketplace_root: &Path) -> anyhow::Re
         .and_then(toml::Value::as_bool)
         != Some(true)
     {
-        anyhow::bail!("config.toml is missing plugins.\"computer-use@openai-bundled\".enabled=true");
+        anyhow::bail!(
+            "config.toml is missing plugins.\"computer-use@openai-bundled\".enabled=true"
+        );
     }
     Ok(())
 }
@@ -722,14 +756,21 @@ fn helper_transport_path(root: &Path) -> PathBuf {
 
 fn plugin_version(plugin_root: &Path) -> anyhow::Result<String> {
     let plugin = read_json_file(&plugin_root.join(".codex-plugin").join("plugin.json"))
-        .ok_or_else(|| anyhow::anyhow!("missing plugin manifest under {}", plugin_root.display()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing plugin manifest under {}", plugin_root.display())
+        })?;
     plugin
         .get("version")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|version| !version.is_empty())
         .map(ToString::to_string)
-        .ok_or_else(|| anyhow::anyhow!("plugin manifest has no version under {}", plugin_root.display()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin manifest has no version under {}",
+                plugin_root.display()
+            )
+        })
 }
 
 fn latest_cache_version_root(cache_root: &Path) -> Option<PathBuf> {
@@ -935,11 +976,10 @@ fn read_json_file(path: &Path) -> Option<Value> {
 }
 
 fn assert_under_path(path: &Path, parent: &Path) -> anyhow::Result<()> {
-    let full = path
-        .parent()
-        .unwrap_or(path)
-        .canonicalize()
-        .or_else(|_| Ok::<PathBuf, std::io::Error>(path.parent().unwrap_or(path).to_path_buf()))?;
+    let full =
+        path.parent().unwrap_or(path).canonicalize().or_else(|_| {
+            Ok::<PathBuf, std::io::Error>(path.parent().unwrap_or(path).to_path_buf())
+        })?;
     let root = parent
         .canonicalize()
         .or_else(|_| Ok::<PathBuf, std::io::Error>(parent.to_path_buf()))?;
