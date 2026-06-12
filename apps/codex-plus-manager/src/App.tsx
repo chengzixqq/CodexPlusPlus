@@ -312,6 +312,69 @@ type LiveContextEntriesResult = CommandResult<{
   entries: CodexContextEntries;
 }>;
 
+type MarketplaceRepairEntry = {
+  name: string;
+  source: string;
+  configured: boolean;
+  sourceExists: boolean;
+  manifestExists: boolean;
+  manifestRepaired: boolean;
+  pluginCount: number | null;
+  message: string;
+};
+
+type MarketplaceRepairResult = CommandResult<{
+  report: {
+    status: Status;
+    message: string;
+    configPath: string;
+    backupPath: string | null;
+    changed: boolean;
+    marketplaces: MarketplaceRepairEntry[];
+  };
+}>;
+
+type ComputerUseStatusResult = CommandResult<{
+  report: {
+    status: Status | "needs_repair";
+    message: string;
+    codexHome: string;
+    marketplaceRoot: string;
+    configPath: string;
+    marketplaceManifestExists: boolean;
+    pluginSourceExists: boolean;
+    pluginCacheExists: boolean;
+    helperTransportExists: boolean;
+    pluginEnabled: boolean;
+    computerUseFeatureEnabled: boolean;
+    remoteConnectionsEnabled: boolean;
+    windowsSandbox: string | null;
+    userEnvironmentEnabled: boolean;
+    chromeNativeManifestPath: string | null;
+    chromeNativeManifestValid: boolean | null;
+  };
+}>;
+
+type ComputerUseRepairStep = {
+  name: string;
+  status: Status | "skipped" | "warning";
+  message: string;
+};
+
+type ComputerUseRepairResult = CommandResult<{
+  report: {
+    status: Status;
+    message: string;
+    codexHome: string;
+    marketplaceRoot: string;
+    bundledSource: string | null;
+    configPath: string;
+    configBackupPath: string | null;
+    changed: boolean;
+    steps: ComputerUseRepairStep[];
+  };
+}>;
+
 type ExtractRelayCommonConfigResult = CommandResult<{
   commonConfigContents: string;
   profileConfigContents: string;
@@ -599,6 +662,7 @@ export function App() {
   const [logs, setLogs] = useState<LogsResult | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
+  const [computerUse, setComputerUse] = useState<ComputerUseStatusResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
   const [ads, setAds] = useState<AdsResult | null>(null);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
@@ -860,6 +924,7 @@ export function App() {
     if (next === "maintenance") {
       await refreshOverview(true);
       await refreshWatcher(true);
+      await refreshComputerUse(true);
     }
   };
 
@@ -898,6 +963,49 @@ export function App() {
       setSettings(result);
       setSettingsForm(normalizeSettings(result.settings));
       showNotice("后端修复", result.message, result.status);
+    }
+  };
+
+  const repairPluginMarketplaces = async () => {
+    const result = await run(() => call<MarketplaceRepairResult>("repair_plugin_marketplaces"));
+    if (result) {
+      const report = result.report;
+      const configured = report?.marketplaces?.filter((entry) => entry.configured).length ?? 0;
+      const repaired = report?.marketplaces?.filter((entry) => entry.manifestRepaired).length ?? 0;
+      const skipped = report?.marketplaces?.filter((entry) => !entry.configured).length ?? 0;
+      showNotice(
+        "插件市场修复",
+        `${result.message} 已注册 ${configured} 个本地市场，修复 ${repaired} 个 manifest，跳过 ${skipped} 个。`,
+        result.status,
+      );
+      await refreshLiveContextEntries(true);
+    }
+  };
+
+  const refreshComputerUse = async (silent = false) => {
+    const result = await run(() => call<ComputerUseStatusResult>("load_computer_use_state"));
+    if (result) {
+      setComputerUse(result);
+      if (!silent && !isSuccessStatus(result.status)) {
+        showNotice("Computer Use 状态", result.message, result.status);
+      }
+    }
+    return result;
+  };
+
+  const repairComputerUse = async () => {
+    const result = await run(() => call<ComputerUseRepairResult>("repair_computer_use"));
+    if (result) {
+      const steps = result.report?.steps ?? [];
+      const warnings = steps.filter((step) => step.status === "warning").length;
+      const skipped = steps.filter((step) => step.status === "skipped").length;
+      showNotice(
+        "Computer Use 修复",
+        `${result.message} 执行 ${steps.length} 个步骤，警告 ${warnings} 个，跳过 ${skipped} 个。请重启 Codex Desktop 让用户环境变量生效。`,
+        result.status,
+      );
+      await refreshComputerUse(true);
+      await refreshLiveContextEntries(true);
     }
   };
 
@@ -1467,6 +1575,9 @@ export function App() {
       launch,
       restart,
       repairBackend,
+      repairPluginMarketplaces,
+      refreshComputerUse,
+      repairComputerUse,
       installEntrypoints,
       uninstallEntrypoints,
       repairShortcuts,
@@ -1576,7 +1687,8 @@ export function App() {
         await refreshOverview(true);
         await refreshRelay(true);
         await refreshWatcher(true);
-        showNotice("检查完成", "已刷新 Codex 应用、入口和 Watcher 状态。", "ok");
+        await refreshComputerUse(true);
+        showNotice("检查完成", "已刷新 Codex 应用、入口、Watcher、Computer Use 和中转状态。", "ok");
       },
       installWatcher: () => watcherAction("install_watcher"),
       uninstallWatcher: () => watcherAction("uninstall_watcher"),
@@ -1706,6 +1818,7 @@ export function App() {
             <MaintenanceScreen
               overview={overview}
               watcher={watcher}
+              computerUse={computerUse}
               settings={settings}
               launchForm={launchForm}
               onLaunchFormChange={setLaunchForm}
@@ -1736,6 +1849,9 @@ type Actions = {
   launch: () => Promise<void>;
   restart: () => Promise<void>;
   repairBackend: () => Promise<void>;
+  repairPluginMarketplaces: () => Promise<void>;
+  refreshComputerUse: () => Promise<ComputerUseStatusResult | null>;
+  repairComputerUse: () => Promise<void>;
   installEntrypoints: () => Promise<void>;
   uninstallEntrypoints: () => Promise<void>;
   repairShortcuts: () => Promise<void>;
@@ -2124,6 +2240,10 @@ function EnhanceScreen({
             <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁、强制解锁入口和特殊插件强制安装。</span>
           </div>
           <Toolbar>
+            <Button onClick={() => void actions.repairPluginMarketplaces()}>
+              <Wrench className="h-4 w-4" aria-hidden="true" />
+              修复本地插件市场
+            </Button>
             <Button onClick={() => void actions.saveSettings()}>保存增强设置</Button>
           </Toolbar>
         </CardContent>
@@ -2499,6 +2619,7 @@ function RecommendationsScreen({ ads, actions }: { ads: AdsResult | null; action
 function MaintenanceScreen({
   overview,
   watcher,
+  computerUse,
   settings,
   launchForm,
   onLaunchFormChange,
@@ -2508,6 +2629,7 @@ function MaintenanceScreen({
 }: {
   overview: OverviewResult | null;
   watcher: WatcherResult | null;
+  computerUse: ComputerUseStatusResult | null;
   settings: SettingsResult | null;
   launchForm: { appPath: string; debugPort: string; helperPort: string };
   onLaunchFormChange: (next: { appPath: string; debugPort: string; helperPort: string }) => void;
@@ -2526,11 +2648,14 @@ function MaintenanceScreen({
             <StatusRow title="静默启动入口" status={overview?.silent_shortcut.status} path={overview?.silent_shortcut.path} />
             <StatusRow title="管理控制台入口" status={overview?.management_shortcut.status} path={overview?.management_shortcut.path} />
             <StatusRow title="Watcher 自动接管" status={watcher?.enabled ? "ok" : "disabled"} path={watcher?.disabled_flag} />
+            <StatusRow title="Computer Use 用户级配置" status={computerUse?.report.status} path={computerUse?.report.marketplaceRoot} />
           </div>
           <Toolbar>
             <Button onClick={() => void actions.checkHealth()}>检查</Button>
             <Button variant="secondary" onClick={() => void actions.repairShortcuts()}>修复快捷方式</Button>
             <Button variant="secondary" onClick={() => void actions.repairBackend()}>修复后端</Button>
+            <Button variant="secondary" onClick={() => void actions.refreshComputerUse()}>检查 Computer Use</Button>
+            <Button variant="secondary" onClick={() => void actions.repairComputerUse()}>修复 Computer Use</Button>
           </Toolbar>
         </CardContent>
       </Panel>

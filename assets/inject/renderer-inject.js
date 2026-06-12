@@ -2543,6 +2543,7 @@
     if (name === "openai-bundled") return "";
     if (name === "openai-curated") return "codex-plus-openai-curated";
     if (name === "openai-primary-runtime") return "codex-plus-openai-primary-runtime";
+    if (name === "openai-role-specific") return "codex-plus-openai-role-specific";
     return "";
   }
 
@@ -2550,6 +2551,7 @@
     if (name === "openai-bundled" || name === "codex-plus-openai-bundled") return "OpenAI插件1(Codex++)";
     if (name === "openai-curated" || name === "codex-plus-openai-curated") return "OpenAI插件2(Codex++)";
     if (name === "openai-primary-runtime" || name === "codex-plus-openai-primary-runtime") return "OpenAI插件3(Codex++)";
+    if (name === "openai-role-specific" || name === "codex-plus-openai-role-specific") return "OpenAI角色插件(Codex++)";
     return fallback;
   }
 
@@ -2581,12 +2583,13 @@
     if (name === "codex-plus-openai-bundled") return "openai-bundled";
     if (name === "codex-plus-openai-curated") return "openai-curated";
     if (name === "codex-plus-openai-primary-runtime") return "openai-primary-runtime";
+    if (name === "codex-plus-openai-role-specific") return "openai-role-specific";
     return name;
   }
 
   function codexPluginOfficialMarketplaceName(name) {
     const restored = restorePluginMarketplaceName(name);
-    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime";
+    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime" || restored === "openai-role-specific";
   }
 
   function isCodexPluginBuildFlavorFilter(callback, sample) {

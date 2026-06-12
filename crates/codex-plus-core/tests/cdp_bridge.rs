@@ -225,9 +225,11 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("if (name === \"openai-bundled\") return \"\""));
     assert!(script.contains("if (name === \"openai-curated\") return \"codex-plus-openai-curated\""));
     assert!(script.contains("if (name === \"openai-primary-runtime\") return \"codex-plus-openai-primary-runtime\""));
+    assert!(script.contains("if (name === \"openai-role-specific\") return \"codex-plus-openai-role-specific\""));
     assert!(script.contains("OpenAI插件1(Codex++)"));
     assert!(script.contains("OpenAI插件2(Codex++)"));
     assert!(script.contains("OpenAI插件3(Codex++)"));
+    assert!(script.contains("OpenAI角色插件(Codex++)"));
     assert!(script.contains("method === \"install-plugin\""));
     assert!(script.contains("plugin_marketplace_response_expanded"));
     assert!(script.contains("plugin_build_flavor_filter_bypassed"));

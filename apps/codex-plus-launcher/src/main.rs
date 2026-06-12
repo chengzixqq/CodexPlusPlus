@@ -218,7 +218,27 @@ where
     let mut options = LaunchOptions::default();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
-        match arg.as_ref() {
+        let arg = arg.as_ref();
+        if let Some(value) = inline_option_value(arg, "--app-path") {
+            let value = value.trim();
+            if !value.is_empty() {
+                options.app_dir = Some(PathBuf::from(value));
+            }
+            continue;
+        }
+        if let Some(value) = inline_option_value(arg, "--debug-port") {
+            if let Ok(port) = value.parse::<u16>() {
+                options.debug_port = port;
+            }
+            continue;
+        }
+        if let Some(value) = inline_option_value(arg, "--helper-port") {
+            if let Ok(port) = value.parse::<u16>() {
+                options.helper_port = port;
+            }
+            continue;
+        }
+        match arg {
             "--app-path" => {
                 if let Some(value) = iter.next() {
                     let value = value.as_ref().trim();
@@ -245,6 +265,10 @@ where
         }
     }
     options
+}
+
+fn inline_option_value<'a>(arg: &'a str, option: &str) -> Option<&'a str> {
+    arg.strip_prefix(option)?.strip_prefix('=')
 }
 
 #[async_trait::async_trait(?Send)]
@@ -535,6 +559,24 @@ impl BridgeRuntimeService for LauncherRuntimeService {
         self.backend_status().await
     }
 
+    async fn repair_plugin_marketplaces(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::to_value(
+            codex_plus_core::marketplace_config::repair_default_local_marketplace_config()?,
+        )?)
+    }
+
+    async fn computer_use_status(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::to_value(
+            codex_plus_core::computer_use_config::inspect_default_computer_use(),
+        )?)
+    }
+
+    async fn repair_computer_use(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::to_value(
+            codex_plus_core::computer_use_config::repair_default_computer_use()?,
+        )?)
+    }
+
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {
         Ok(codex_plus_core::model_catalog::read_codex_model_catalog().await)
     }
@@ -743,6 +785,19 @@ mod tests {
             "9333",
             "--helper-port",
             "57322",
+        ]);
+
+        assert_eq!(options.app_dir, Some(PathBuf::from("C:/Codex/App")));
+        assert_eq!(options.debug_port, 9333);
+        assert_eq!(options.helper_port, 57322);
+    }
+
+    #[test]
+    fn parse_launch_options_accepts_equals_form() {
+        let options = parse_launch_options([
+            "--app-path=C:/Codex/App",
+            "--debug-port=9333",
+            "--helper-port=57322",
         ]);
 
         assert_eq!(options.app_dir, Some(PathBuf::from("C:/Codex/App")));

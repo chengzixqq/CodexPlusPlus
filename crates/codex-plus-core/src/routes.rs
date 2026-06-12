@@ -78,6 +78,9 @@ pub trait BridgeRuntimeService: Send + Sync {
     async fn open_manager(&self) -> anyhow::Result<Value>;
     async fn backend_status(&self) -> anyhow::Result<Value>;
     async fn repair_backend(&self) -> anyhow::Result<Value>;
+    async fn repair_plugin_marketplaces(&self) -> anyhow::Result<Value>;
+    async fn computer_use_status(&self) -> anyhow::Result<Value>;
+    async fn repair_computer_use(&self) -> anyhow::Result<Value>;
     async fn codex_model_catalog(&self) -> anyhow::Result<Value>;
     async fn ads(&self) -> anyhow::Result<Value>;
     async fn zed_remote_status(&self) -> anyhow::Result<Value>;
@@ -166,6 +169,9 @@ pub async fn handle_bridge_request(
         "/manager/open" => ctx.runtime.open_manager().await,
         "/backend/status" => ctx.runtime.backend_status().await,
         "/backend/repair" => ctx.runtime.repair_backend().await,
+        "/plugin-marketplaces/repair" => ctx.runtime.repair_plugin_marketplaces().await,
+        "/computer-use/status" => ctx.runtime.computer_use_status().await,
+        "/computer-use/repair" => ctx.runtime.repair_computer_use().await,
         "/codex-model-catalog" | "/codex-config-model" => ctx.runtime.codex_model_catalog().await,
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),
         "/ads" => ctx.runtime.ads().await,
@@ -460,6 +466,24 @@ impl BridgeRuntimeService for CoreRuntimeService {
 
     async fn repair_backend(&self) -> anyhow::Result<Value> {
         self.backend_status().await
+    }
+
+    async fn repair_plugin_marketplaces(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::to_value(
+            crate::marketplace_config::repair_default_local_marketplace_config()?,
+        )?)
+    }
+
+    async fn computer_use_status(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::to_value(
+            crate::computer_use_config::inspect_default_computer_use(),
+        )?)
+    }
+
+    async fn repair_computer_use(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::to_value(
+            crate::computer_use_config::repair_default_computer_use()?,
+        )?)
     }
 
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {

@@ -59,6 +59,24 @@ pub struct SettingsPayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MarketplaceRepairPayload {
+    pub report: codex_plus_core::marketplace_config::MarketplaceRepairReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerUseStatusPayload {
+    pub report: codex_plus_core::computer_use_config::ComputerUseStatusReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerUseRepairPayload {
+    pub report: codex_plus_core::computer_use_config::ComputerUseRepairReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalSessionsPayload {
     pub db_path: String,
     pub sessions: Vec<codex_plus_data::LocalSession>,
@@ -1621,6 +1639,53 @@ pub fn sync_live_context_entries(
             LiveContextEntriesPayload {
                 entries: empty_context_entries(),
             },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn repair_plugin_marketplaces() -> CommandResult<Value> {
+    match codex_plus_core::marketplace_config::repair_default_local_marketplace_config() {
+        Ok(report) => {
+            let message = report.message.clone();
+            ok(
+                &message,
+                serde_json::to_value(MarketplaceRepairPayload { report })
+                    .unwrap_or_else(|error| json!({"error": error.to_string()})),
+            )
+        }
+        Err(error) => failed(
+            &format!("修复插件市场失败：{error}"),
+            json!({"error": error.to_string()}),
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn load_computer_use_state() -> CommandResult<Value> {
+    let report = codex_plus_core::computer_use_config::inspect_default_computer_use();
+    let message = report.message.clone();
+    ok(
+        &message,
+        serde_json::to_value(ComputerUseStatusPayload { report })
+            .unwrap_or_else(|error| json!({"error": error.to_string()})),
+    )
+}
+
+#[tauri::command]
+pub fn repair_computer_use() -> CommandResult<Value> {
+    match codex_plus_core::computer_use_config::repair_default_computer_use() {
+        Ok(report) => {
+            let message = report.message.clone();
+            ok(
+                &message,
+                serde_json::to_value(ComputerUseRepairPayload { report })
+                    .unwrap_or_else(|error| json!({"error": error.to_string()})),
+            )
+        }
+        Err(error) => failed(
+            &format!("修复 Computer Use 失败：{error}"),
+            json!({"error": error.to_string()}),
         ),
     }
 }

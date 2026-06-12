@@ -33,6 +33,8 @@ async fn bridge_routes_cover_all_current_paths() {
         ("/manager/open", json!({})),
         ("/backend/status", json!({})),
         ("/backend/repair", json!({})),
+        ("/computer-use/status", json!({})),
+        ("/computer-use/repair", json!({})),
         ("/codex-model-catalog", json!({})),
         ("/codex-config-model", json!({})),
         ("/ads", json!({})),
@@ -301,6 +303,18 @@ async fn runtime_status_devtools_repair_and_ads_routes_are_dispatched() {
     assert_eq!(
         handle_bridge_request(ctx.clone(), "/backend/repair", json!({})).await,
         json!({"status": "ok", "message": "后端已修复", "version": codex_plus_core::version::VERSION})
+    );
+    assert_eq!(
+        handle_bridge_request(ctx.clone(), "/plugin-marketplaces/repair", json!({})).await,
+        json!({"status": "ok", "message": "插件市场已修复", "changed": false, "marketplaces": []})
+    );
+    assert_eq!(
+        handle_bridge_request(ctx.clone(), "/computer-use/status", json!({})).await,
+        json!({"status": "ok", "message": "Computer Use 已就绪"})
+    );
+    assert_eq!(
+        handle_bridge_request(ctx.clone(), "/computer-use/repair", json!({})).await,
+        json!({"status": "ok", "message": "Computer Use 已修复", "changed": false, "steps": []})
     );
     assert_eq!(
         handle_bridge_request(ctx.clone(), "/ads", json!({})).await,
@@ -1062,6 +1076,23 @@ impl BridgeRuntimeService for FakeRuntime {
         Ok(
             json!({"status": "ok", "message": "后端已修复", "version": codex_plus_core::version::VERSION}),
         )
+    }
+
+    async fn repair_plugin_marketplaces(&self) -> anyhow::Result<Value> {
+        Ok(json!({
+            "status": "ok",
+            "message": "插件市场已修复",
+            "changed": false,
+            "marketplaces": []
+        }))
+    }
+
+    async fn computer_use_status(&self) -> anyhow::Result<Value> {
+        Ok(json!({"status": "ok", "message": "Computer Use 已就绪"}))
+    }
+
+    async fn repair_computer_use(&self) -> anyhow::Result<Value> {
+        Ok(json!({"status": "ok", "message": "Computer Use 已修复", "changed": false, "steps": []}))
     }
 
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {
