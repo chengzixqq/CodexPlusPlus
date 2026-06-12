@@ -247,7 +247,9 @@ where
 
         let mut injection_degraded = false;
         if settings.enhancements_enabled {
-            let injection_ready = hooks.ensure_injection(debug_port, helper_port, &app_dir).await;
+            let injection_ready = hooks
+                .ensure_injection(debug_port, helper_port, &app_dir)
+                .await;
             if injection_ready {
                 keep_launched_on_error = false;
                 hooks.start_bridge_watchdog(debug_port, helper_port).await?;
@@ -472,6 +474,9 @@ impl LaunchHooks for DefaultLaunchHooks {
         debug_port: u16,
         extra_args: &[String],
     ) -> anyhow::Result<CodexLaunch> {
+        #[cfg(windows)]
+        ensure_computer_use_configuration_for_launch().await;
+
         if cfg!(windows) {
             if let Some(activation) = build_packaged_activation(app_dir, debug_port, extra_args) {
                 let CodexLaunch::PackagedActivation {
@@ -646,6 +651,48 @@ fn hydrate_live_ccs_profiles(settings: &mut BackendSettings) {
         .relay_profiles
         .retain(|profile| profile.linked_ccs_provider_id.trim().is_empty());
     let _ = crate::ccs_import::sync_linked_profiles_from_default_db(&mut settings.relay_profiles);
+}
+
+#[cfg(windows)]
+async fn ensure_computer_use_configuration_for_launch() {
+    let result = tokio::task::spawn_blocking(|| {
+        let status = crate::computer_use_config::inspect_default_computer_use();
+        if status.status == "ok" {
+            return Ok::<_, anyhow::Error>((status, None));
+        }
+        let report = crate::computer_use_config::repair_default_computer_use()?;
+        let status = crate::computer_use_config::inspect_default_computer_use();
+        Ok((status, Some(report)))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((status, report))) => {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "launcher.computer_use_auto_repair",
+                serde_json::json!({
+                    "status": status.status,
+                    "message": status.message,
+                    "browserPluginCacheExists": status.browser_plugin_cache_exists,
+                    "chromePluginCacheExists": status.chrome_plugin_cache_exists,
+                    "changed": report.as_ref().map(|report| report.changed),
+                    "steps": report.as_ref().map(|report| &report.steps),
+                }),
+            );
+        }
+        Ok(Err(error)) => {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "launcher.computer_use_auto_repair_failed",
+                serde_json::json!({ "message": error.to_string() }),
+            );
+        }
+        Err(error) => {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "launcher.computer_use_auto_repair_failed",
+                serde_json::json!({ "message": error.to_string() }),
+            );
+        }
+    }
 }
 
 async fn handle_helper_connection(

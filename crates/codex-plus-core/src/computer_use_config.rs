@@ -1,6 +1,6 @@
 use anyhow::Context;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table};
@@ -47,6 +47,10 @@ pub struct ComputerUseStatusReport {
     pub marketplace_manifest_exists: bool,
     pub plugin_source_exists: bool,
     pub plugin_cache_exists: bool,
+    pub browser_plugin_source_exists: bool,
+    pub browser_plugin_cache_exists: bool,
+    pub chrome_plugin_source_exists: bool,
+    pub chrome_plugin_cache_exists: bool,
     pub helper_transport_exists: bool,
     pub plugin_enabled: bool,
     pub computer_use_feature_enabled: bool,
@@ -128,11 +132,17 @@ pub fn inspect_computer_use_in_home(home: &Path) -> ComputerUseStatusReport {
         .join(".codex-plugin")
         .join("plugin.json")
         .is_file();
+    let browser_plugin_source_exists = bundled_plugin_source_exists(&marketplace_root, "browser");
+    let browser_plugin_cache_exists = bundled_plugin_cache_exists(&home, "browser");
+    let chrome_plugin_source_exists = bundled_plugin_source_exists(&marketplace_root, "chrome");
+    let chrome_plugin_cache_exists = bundled_plugin_cache_exists(&home, "chrome");
     let helper_transport_exists = helper_transport_path(&cache_latest).is_file();
     let user_environment_enabled = user_environment_enabled();
     let ready = marketplace_manifest_exists
         && plugin_source_exists
         && plugin_cache_exists
+        && (!browser_plugin_source_exists || browser_plugin_cache_exists)
+        && (!chrome_plugin_source_exists || chrome_plugin_cache_exists)
         && helper_transport_exists
         && plugin_enabled
         && computer_use_feature_enabled
@@ -154,6 +164,10 @@ pub fn inspect_computer_use_in_home(home: &Path) -> ComputerUseStatusReport {
         marketplace_manifest_exists,
         plugin_source_exists,
         plugin_cache_exists,
+        browser_plugin_source_exists,
+        browser_plugin_cache_exists,
+        chrome_plugin_source_exists,
+        chrome_plugin_cache_exists,
         helper_transport_exists,
         plugin_enabled,
         computer_use_feature_enabled,
@@ -418,6 +432,26 @@ fn bundled_manifest_path(root: &Path) -> PathBuf {
         .join("marketplace.json")
 }
 
+fn bundled_plugin_source_exists(marketplace_root: &Path, plugin: &str) -> bool {
+    marketplace_root
+        .join("plugins")
+        .join(plugin)
+        .join(".codex-plugin")
+        .join("plugin.json")
+        .is_file()
+}
+
+fn bundled_plugin_cache_exists(home: &Path, plugin: &str) -> bool {
+    home.join("plugins")
+        .join("cache")
+        .join("openai-bundled")
+        .join(plugin)
+        .join("latest")
+        .join(".codex-plugin")
+        .join("plugin.json")
+        .is_file()
+}
+
 fn write_computer_use_plugin_tree(root: &Path) -> anyhow::Result<()> {
     write_json_file(
         &root.join(".codex-plugin").join("plugin.json"),
@@ -680,6 +714,23 @@ fn verify_computer_use_paths(home: &Path, marketplace_root: &Path) -> anyhow::Re
     ] {
         if !path.is_file() {
             anyhow::bail!("missing required Computer Use path: {}", path.display());
+        }
+    }
+    for plugin in ["browser", "chrome"] {
+        if bundled_plugin_source_exists(marketplace_root, plugin)
+            && !bundled_plugin_cache_exists(home, plugin)
+        {
+            anyhow::bail!(
+                "missing required bundled plugin cache path: {}",
+                home.join("plugins")
+                    .join("cache")
+                    .join("openai-bundled")
+                    .join(plugin)
+                    .join("latest")
+                    .join(".codex-plugin")
+                    .join("plugin.json")
+                    .display()
+            );
         }
     }
     let config = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();

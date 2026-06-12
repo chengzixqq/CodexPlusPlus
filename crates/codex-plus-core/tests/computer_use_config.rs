@@ -77,7 +77,27 @@ enabled = true
             .join("cache")
             .join("openai-bundled")
             .join("browser")
+            .join("latest")
+            .join(".codex-plugin")
+            .join("plugin.json")
+            .is_file()
+    );
+    assert!(
+        home.join("plugins")
+            .join("cache")
+            .join("openai-bundled")
+            .join("browser")
             .join("1.2.3")
+            .join(".codex-plugin")
+            .join("plugin.json")
+            .is_file()
+    );
+    assert!(
+        home.join("plugins")
+            .join("cache")
+            .join("openai-bundled")
+            .join("chrome")
+            .join("latest")
             .join(".codex-plugin")
             .join("plugin.json")
             .is_file()
@@ -100,11 +120,47 @@ enabled = true
     assert!(status.marketplace_manifest_exists);
     assert!(status.plugin_source_exists);
     assert!(status.plugin_cache_exists);
+    assert!(status.browser_plugin_source_exists);
+    assert!(status.browser_plugin_cache_exists);
+    assert!(status.chrome_plugin_source_exists);
+    assert!(status.chrome_plugin_cache_exists);
     assert!(status.helper_transport_exists);
     assert!(status.plugin_enabled);
     assert!(status.computer_use_feature_enabled);
     assert!(status.remote_connections_enabled);
     assert_eq!(status.windows_sandbox.as_deref(), Some("unelevated"));
+}
+
+#[test]
+fn inspect_computer_use_reports_missing_browser_latest_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join(".codex");
+    let source = temp.path().join("source-openai-bundled");
+    write_bundled_source(&source);
+    std::fs::create_dir_all(&home).unwrap();
+
+    repair_computer_use_in_home(
+        &home,
+        ComputerUseRepairOptions {
+            bundled_source: Some(source),
+            skip_user_environment: true,
+            verify_helper_transport: false,
+        },
+    )
+    .unwrap();
+    let browser_latest = home
+        .join("plugins")
+        .join("cache")
+        .join("openai-bundled")
+        .join("browser")
+        .join("latest");
+    std::fs::remove_dir_all(&browser_latest).unwrap();
+
+    let status = inspect_computer_use_in_home(&home);
+
+    assert_eq!(status.status, "needs_repair");
+    assert!(status.browser_plugin_source_exists);
+    assert!(!status.browser_plugin_cache_exists);
 }
 
 #[test]

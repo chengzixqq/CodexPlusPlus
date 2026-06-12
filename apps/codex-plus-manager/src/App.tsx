@@ -344,6 +344,10 @@ type ComputerUseStatusResult = CommandResult<{
     marketplaceManifestExists: boolean;
     pluginSourceExists: boolean;
     pluginCacheExists: boolean;
+    browserPluginSourceExists: boolean;
+    browserPluginCacheExists: boolean;
+    chromePluginSourceExists: boolean;
+    chromePluginCacheExists: boolean;
     helperTransportExists: boolean;
     pluginEnabled: boolean;
     computerUseFeatureEnabled: boolean;
@@ -1000,7 +1004,7 @@ export function App() {
       const warnings = steps.filter((step) => step.status === "warning").length;
       const skipped = steps.filter((step) => step.status === "skipped").length;
       showNotice(
-        "Computer Use 修复",
+        "Computer Use / Browser 修复",
         `${result.message} 执行 ${steps.length} 个步骤，警告 ${warnings} 个，跳过 ${skipped} 个。请重启 Codex Desktop 让用户环境变量生效。`,
         result.status,
       );
@@ -2648,14 +2652,14 @@ function MaintenanceScreen({
             <StatusRow title="静默启动入口" status={overview?.silent_shortcut.status} path={overview?.silent_shortcut.path} />
             <StatusRow title="管理控制台入口" status={overview?.management_shortcut.status} path={overview?.management_shortcut.path} />
             <StatusRow title="Watcher 自动接管" status={watcher?.enabled ? "ok" : "disabled"} path={watcher?.disabled_flag} />
-            <StatusRow title="Computer Use 用户级配置" status={computerUse?.report.status} path={computerUse?.report.marketplaceRoot} />
+            <StatusRow title="Computer Use / Browser 用户级配置" status={computerUse?.report.status} path={computerUse?.report.marketplaceRoot} />
           </div>
           <Toolbar>
             <Button onClick={() => void actions.checkHealth()}>检查</Button>
             <Button variant="secondary" onClick={() => void actions.repairShortcuts()}>修复快捷方式</Button>
             <Button variant="secondary" onClick={() => void actions.repairBackend()}>修复后端</Button>
-            <Button variant="secondary" onClick={() => void actions.refreshComputerUse()}>检查 Computer Use</Button>
-            <Button variant="secondary" onClick={() => void actions.repairComputerUse()}>修复 Computer Use</Button>
+            <Button variant="secondary" onClick={() => void actions.refreshComputerUse()}>检查 Computer Use / Browser</Button>
+            <Button variant="secondary" onClick={() => void actions.repairComputerUse()}>修复 Computer Use / Browser</Button>
           </Toolbar>
         </CardContent>
       </Panel>
