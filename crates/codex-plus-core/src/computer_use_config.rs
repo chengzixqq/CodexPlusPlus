@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table};
 
 const COMPUTER_USE_VERSION: &str = "0.1.0-local";
+const PERSISTENT_BUNDLED_PLUGINS: &[&str] = &["browser", "chrome"];
 
 #[derive(Debug, Clone, Default)]
 pub struct ComputerUseRepairOptions {
@@ -555,6 +556,9 @@ fn update_bundled_marketplace_manifest(marketplace_root: &Path) -> anyhow::Resul
         .into_iter()
         .filter(|entry| entry.get("name").and_then(Value::as_str) != Some("computer-use"))
         .collect::<Vec<_>>();
+    for &plugin in PERSISTENT_BUNDLED_PLUGINS {
+        ensure_persistent_bundled_plugin_manifest_entry(marketplace_root, &mut plugins, plugin);
+    }
     plugins.insert(
         0,
         json!({
@@ -566,6 +570,42 @@ fn update_bundled_marketplace_manifest(marketplace_root: &Path) -> anyhow::Resul
     );
     manifest["plugins"] = Value::Array(plugins);
     write_json_file(&manifest_path, &manifest)
+}
+
+fn ensure_persistent_bundled_plugin_manifest_entry(
+    marketplace_root: &Path,
+    plugins: &mut Vec<Value>,
+    plugin: &str,
+) {
+    if !bundled_plugin_source_exists(marketplace_root, plugin) {
+        return;
+    }
+    if let Some(entry) = plugins
+        .iter_mut()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(plugin))
+    {
+        ensure_bundled_plugin_installed_by_default(entry, plugin);
+        return;
+    }
+    plugins.push(json!({
+        "name": plugin,
+        "source": {"source": "local", "path": format!("./plugins/{plugin}")},
+        "policy": {"installation": "INSTALLED_BY_DEFAULT", "authentication": "ON_INSTALL"},
+        "category": "Productivity"
+    }));
+}
+
+fn ensure_bundled_plugin_installed_by_default(entry: &mut Value, plugin: &str) {
+    if entry.get("source").is_none() {
+        entry["source"] = json!({"source": "local", "path": format!("./plugins/{plugin}")});
+    }
+    if !entry.get("policy").is_some_and(Value::is_object) {
+        entry["policy"] = json!({});
+    }
+    entry["policy"]["installation"] = json!("INSTALLED_BY_DEFAULT");
+    if entry["policy"].get("authentication").is_none() {
+        entry["policy"]["authentication"] = json!("ON_INSTALL");
+    }
 }
 
 fn sync_bundled_plugin_cache(
@@ -673,6 +713,10 @@ fn update_codex_config(home: &Path) -> anyhow::Result<(bool, Option<String>)> {
     {
         let plugin =
             nested_table_mut_or_insert(&mut doc, &["plugins", "computer-use@openai-bundled"])?;
+        plugin["enabled"] = toml_edit::value(true);
+    }
+    {
+        let plugin = nested_table_mut_or_insert(&mut doc, &["plugins", "browser@openai-bundled"])?;
         plugin["enabled"] = toml_edit::value(true);
     }
     {

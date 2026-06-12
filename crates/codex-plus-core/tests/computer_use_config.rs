@@ -44,6 +44,7 @@ enabled = true
     let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
     assert!(config.contains("[marketplaces.openai-bundled]"));
     assert!(config.contains("[plugins.\"computer-use@openai-bundled\"]"));
+    assert!(config.contains("[plugins.\"browser@openai-bundled\"]"));
     assert!(config.contains("computer_use = true"));
     assert!(config.contains("remote_connections = true"));
     assert!(config.contains("sandbox = \"unelevated\""));
@@ -114,6 +115,18 @@ enabled = true
     )
     .unwrap();
     assert_eq!(manifest["plugins"][0]["name"], "computer-use");
+    assert_eq!(
+        plugin_installation_policy(&manifest, "browser").as_deref(),
+        Some("INSTALLED_BY_DEFAULT")
+    );
+    assert_eq!(
+        plugin_installation_policy(&manifest, "chrome").as_deref(),
+        Some("INSTALLED_BY_DEFAULT")
+    );
+    assert_eq!(
+        plugin_source_path(&manifest, "chrome").as_deref(),
+        Some("./plugins/chrome")
+    );
 
     let status = inspect_computer_use_in_home(&home);
     assert!(matches!(status.status.as_str(), "ok" | "needs_repair"));
@@ -129,6 +142,28 @@ enabled = true
     assert!(status.computer_use_feature_enabled);
     assert!(status.remote_connections_enabled);
     assert_eq!(status.windows_sandbox.as_deref(), Some("unelevated"));
+}
+
+fn plugin_installation_policy(manifest: &serde_json::Value, name: &str) -> Option<String> {
+    manifest["plugins"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some(name))?
+        .get("policy")?
+        .get("installation")?
+        .as_str()
+        .map(ToString::to_string)
+}
+
+fn plugin_source_path(manifest: &serde_json::Value, name: &str) -> Option<String> {
+    manifest["plugins"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some(name))?
+        .get("source")?
+        .get("path")?
+        .as_str()
+        .map(ToString::to_string)
 }
 
 #[test]
