@@ -92,7 +92,6 @@ pub fn repair_local_marketplace_config_in_home(
     let backup_path = if changed {
         let backup_path = backup_config_if_exists(home, &config_path)?;
         crate::settings::atomic_write(&config_path, updated.as_bytes())?;
-        let _ = crate::config_coordinator::record_write_marker("codexplusplus", home);
         backup_path
     } else {
         None
@@ -239,10 +238,7 @@ fn remove_stale_curated_alias(doc: &mut DocumentMut, home: &Path) -> anyhow::Res
     let Some(marketplaces) = doc.get_mut("marketplaces").and_then(Item::as_table_mut) else {
         return Ok(false);
     };
-    let Some(curated_table) = marketplaces
-        .get("openai-curated")
-        .and_then(Item::as_table)
-    else {
+    let Some(curated_table) = marketplaces.get("openai-curated").and_then(Item::as_table) else {
         return Ok(false);
     };
 

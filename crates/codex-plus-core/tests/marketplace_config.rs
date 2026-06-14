@@ -81,7 +81,12 @@ fn registers_openai_role_specific_marketplace_when_present() {
     write_nested_manifest(
         &role_specific,
         "role-specific-plugins",
-        &["sales", "data-analytics", "product-design", "financial-markets"],
+        &[
+            "sales",
+            "data-analytics",
+            "product-design",
+            "financial-markets",
+        ],
     );
     std::fs::create_dir_all(&codex_home).unwrap();
     std::fs::write(codex_home.join("config.toml"), "model = \"gpt-5\"\n").unwrap();

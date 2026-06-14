@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codex_plus_core::install::SILENT_BINARY;
@@ -79,6 +80,7 @@ pub struct ComputerUseRepairPayload {
 #[serde(rename_all = "camelCase")]
 pub struct LocalSessionsPayload {
     pub db_path: String,
+    pub db_paths: Vec<String>,
     pub sessions: Vec<codex_plus_data::LocalSession>,
 }
 
@@ -101,13 +103,8 @@ pub struct DeleteLocalSessionRequest {
     pub session_id: String,
     #[serde(default)]
     pub title: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CcsProvidersPayload {
-    pub db_path: String,
-    pub providers: Vec<codex_plus_core::ccs_import::CcsProviderImport>,
+    #[serde(default)]
+    pub db_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +127,15 @@ pub struct RelayFilesPayload {
     pub auth_path: String,
     pub config_contents: String,
     pub auth_contents: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelaySwitchPayload {
+    pub settings: BackendSettings,
+    pub relay: RelayPayload,
+    pub settings_path: String,
+    pub user_scripts: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -420,50 +426,8 @@ pub fn load_settings() -> CommandResult<SettingsPayload> {
 }
 
 #[tauri::command]
-pub fn get_config_coordination_status() -> CommandResult<codex_plus_core::config_coordinator::CoordinationStatus> {
-    let settings =
-        settings_with_live_ccs_profiles(SettingsStore::default().load().unwrap_or_default());
-    ok(
-        "已读取配置协调状态。",
-        codex_plus_core::config_coordinator::coordination_status(&settings),
-    )
-}
-
-#[tauri::command]
 pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload> {
-    let mut settings = normalize_settings_before_save(settings);
-    if settings.ccs_link_enabled {
-        if let Err(error) = codex_plus_core::ccs_import::write_linked_profiles_to_default_db(
-            &settings.relay_profiles,
-        ) {
-            let payload = SettingsPayload {
-                settings,
-                settings_path: codex_plus_core::paths::default_settings_path()
-                    .to_string_lossy()
-                    .to_string(),
-                user_scripts: user_script_inventory(),
-            };
-            return failed(&format!("写回 cc-switch 供应商配置失败：{error}"), payload);
-        }
-        let active = settings.active_relay_profile();
-        if !active.linked_ccs_provider_id.trim().is_empty() {
-            if let Err(error) =
-                codex_plus_core::ccs_import::set_current_codex_provider_in_default_db(
-                    &active.linked_ccs_provider_id,
-                )
-            {
-                let payload = SettingsPayload {
-                    settings,
-                    settings_path: codex_plus_core::paths::default_settings_path()
-                        .to_string_lossy()
-                        .to_string(),
-                    user_scripts: user_script_inventory(),
-                };
-                return failed(&format!("同步 cc-switch 当前供应商失败：{error}"), payload);
-            }
-        }
-    }
-    remove_linked_ccs_profiles_for_local_storage(&mut settings);
+    let settings = normalize_settings_before_save(settings);
     match SettingsStore::default().save(&settings) {
         Ok(()) => {
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
@@ -486,79 +450,50 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
 }
 
 #[tauri::command]
-pub fn load_ccs_providers() -> CommandResult<CcsProvidersPayload> {
-    let db_path = codex_plus_core::ccs_import::default_ccs_db_path();
-    match codex_plus_core::ccs_import::list_codex_providers_from_db(&db_path) {
-        Ok(providers) => ok(
-            &format!("已读取外部 Codex 供应商配置：{} 个。", providers.len()),
-            CcsProvidersPayload {
-                db_path: db_path.to_string_lossy().to_string(),
-                providers,
-            },
-        ),
-        Err(error) => failed(
-            &format!("读取外部供应商配置失败：{error}"),
-            CcsProvidersPayload {
-                db_path: db_path.to_string_lossy().to_string(),
-                providers: Vec::new(),
-            },
-        ),
-    }
-}
-
-#[tauri::command]
-pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
-    let store = SettingsStore::default();
-    let mut settings = store.load().unwrap_or_default();
-    let synced = match codex_plus_core::ccs_import::list_codex_providers_from_default_db() {
-        Ok(providers) => providers.len(),
-        Err(error) => {
-            let payload = settings_payload_value()
-                .map(|payload| payload)
-                .unwrap_or_else(|(_, payload)| payload);
-            return failed(&format!("读取外部供应商配置失败：{error}"), payload);
-        }
-    };
-    settings.ccs_link_enabled = true;
-    remove_linked_ccs_profiles_for_local_storage(&mut settings);
-
-    if synced == 0 {
-        return settings_payload("没有可联动的 cc-switch Codex 供应商配置。", "设置读取失败");
-    }
-
-    match store.save(&settings) {
-        Ok(()) => settings_payload(
-            &format!("已开启 cc-switch 联动：{synced} 个供应商将直接从 cc-switch 读取。"),
-            "联动供应商配置后重新读取设置失败",
-        ),
-        Err(error) => failed(
-            &format!("保存外部供应商配置失败：{error}"),
-            settings_payload_value()
-                .map(|payload| payload)
-                .unwrap_or_else(|(_, payload)| payload),
-        ),
-    }
-}
-
-#[tauri::command]
 pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
-    let db_path = codex_plus_core::relay_config::default_codex_home_dir().join("state_5.sqlite");
-    let adapter = local_session_adapter(&db_path);
-    match adapter.list_local_sessions() {
-        Ok(sessions) => ok(
-            &format!("已读取 {} 个本地会话。", sessions.len()),
-            LocalSessionsPayload {
-                db_path: db_path.to_string_lossy().to_string(),
-                sessions,
-            },
-        ),
-        Err(error) => failed(
-            &format!("读取本地会话失败：{error}"),
-            LocalSessionsPayload {
-                db_path: db_path.to_string_lossy().to_string(),
-                sessions: Vec::new(),
-            },
-        ),
+    let home = codex_plus_core::codex_sqlite::default_codex_home_dir();
+    let db_paths = codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(&home);
+    let mut sessions = Vec::new();
+    let mut errors = Vec::new();
+    for db_path in &db_paths {
+        let adapter = local_session_adapter(db_path);
+        match adapter.list_local_sessions() {
+            Ok(mut items) => sessions.append(&mut items),
+            Err(error) if db_path.exists() => {
+                errors.push(format!("{}: {error}", db_path.to_string_lossy()));
+            }
+            Err(_) => {}
+        }
+    }
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    let mut seen_session_ids = std::collections::HashSet::new();
+    sessions.retain(|session| seen_session_ids.insert(session.id.clone()));
+    let payload = LocalSessionsPayload {
+        db_path: db_paths
+            .first()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        db_paths: db_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+        sessions,
+    };
+    if errors.is_empty() {
+        ok(
+            &format!("已读取 {} 个本地会话。", payload.sessions.len()),
+            payload,
+        )
+    } else {
+        failed(
+            &format!("读取部分本地会话失败：{}", errors.join("; ")),
+            payload,
+        )
     }
 }
 
@@ -650,13 +585,55 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
             },
         );
     }
-    let db_path = codex_plus_core::relay_config::default_codex_home_dir().join("state_5.sqlite");
-    let adapter = local_session_adapter(&db_path);
     let session = SessionRef {
         session_id: session_id.to_string(),
         title: request.title,
     };
-    let result = adapter.delete_local(&session);
+    let mut candidate_paths = Vec::new();
+    if let Some(path) = request.db_path.as_deref() {
+        let path = PathBuf::from(path);
+        if !candidate_paths.iter().any(|candidate| candidate == &path) {
+            candidate_paths.push(path);
+        }
+    }
+    for path in codex_plus_core::codex_sqlite::codex_session_db_paths_from_home(
+        &codex_plus_core::codex_sqlite::default_codex_home_dir(),
+    ) {
+        if !candidate_paths.iter().any(|candidate| candidate == &path) {
+            candidate_paths.push(path);
+        }
+    }
+    log_manager_event(
+        "manager.delete_local_session.start",
+        json!({
+            "session_id": session_id,
+            "title": session.title,
+            "requested_db_path": request.db_path,
+            "candidate_paths": candidate_paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+        }),
+    );
+    let result = codex_plus_data::delete_local_from_paths(
+        candidate_paths.clone(),
+        codex_plus_data::BackupStore::new(
+            codex_plus_core::paths::default_app_state_dir().join("backups"),
+        ),
+        &session,
+    );
+    log_manager_event(
+        "manager.delete_local_session.finish",
+        json!({
+            "session_id": session_id,
+            "final_status": format!("{:?}", result.status),
+            "final_message": result.message,
+            "candidate_paths": candidate_paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+        }),
+    );
     let status = if matches!(
         result.status,
         codex_plus_core::models::DeleteStatus::LocalDeleted
@@ -739,8 +716,10 @@ fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSetti
         normalize_provider_sync_provider_list(settings.provider_sync_saved_providers);
     settings.provider_sync_manual_providers =
         normalize_provider_sync_provider_list(settings.provider_sync_manual_providers);
-    settings.provider_sync_last_selected_provider =
-        settings.provider_sync_last_selected_provider.trim().to_string();
+    settings.provider_sync_last_selected_provider = settings
+        .provider_sync_last_selected_provider
+        .trim()
+        .to_string();
     settings
 }
 
@@ -758,40 +737,6 @@ fn normalize_provider_sync_provider_list(values: Vec<String>) -> Vec<String> {
     }
     result.sort();
     result
-}
-
-fn settings_with_live_ccs_profiles(mut settings: BackendSettings) -> BackendSettings {
-    if !settings.ccs_link_enabled {
-        return settings;
-    }
-    remove_linked_ccs_profiles_for_local_storage(&mut settings);
-    if let Err(error) = codex_plus_core::ccs_import::sync_linked_profiles_from_default_db(
-        &mut settings.relay_profiles,
-    ) {
-        log_manager_event(
-            "manager.settings_with_live_ccs_profiles.failed",
-            json!({ "error": error.to_string() }),
-        );
-    }
-    settings
-}
-
-fn remove_linked_ccs_profiles_for_local_storage(settings: &mut BackendSettings) {
-    settings
-        .relay_profiles
-        .retain(|profile| profile.linked_ccs_provider_id.trim().is_empty());
-    if !settings.ccs_link_enabled
-        && !settings
-            .relay_profiles
-            .iter()
-            .any(|profile| profile.id == settings.active_relay_id)
-    {
-        settings.active_relay_id = settings
-            .relay_profiles
-            .first()
-            .map(|profile| profile.id.clone())
-            .unwrap_or_else(codex_plus_core::settings::default_active_relay_id);
-    }
 }
 
 fn relay_combined_common_config(settings: &BackendSettings) -> String {
@@ -928,11 +873,10 @@ fn ensure_text_newline(value: &str) -> String {
 #[tauri::command]
 pub async fn load_provider_sync_targets() -> CommandResult<Value> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let result = tauri::async_runtime::spawn_blocking(|| {
-        codex_plus_data::load_provider_sync_targets(None)
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("provider target discovery task failed: {error}"));
+    let result =
+        tauri::async_runtime::spawn_blocking(|| codex_plus_data::load_provider_sync_targets(None))
+            .await
+            .map_err(|error| anyhow::anyhow!("provider target discovery task failed: {error}"));
     match result {
         Ok(mut targets) => {
             let manual = settings
@@ -1011,7 +955,9 @@ pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResul
         Ok(sync) => {
             if is_success_sync_status(&sync.status) {
                 persist_provider_sync_selection(
-                    target_for_settings.as_deref().unwrap_or(&sync.target_provider),
+                    target_for_settings
+                        .as_deref()
+                        .unwrap_or(&sync.target_provider),
                 );
             }
             ok(
@@ -1211,8 +1157,7 @@ pub async fn repair_shortcuts() -> InstallActionResult {
 
 #[tauri::command]
 pub fn repair_backend() -> CommandResult<SettingsPayload> {
-    let settings =
-        settings_with_live_ccs_profiles(SettingsStore::default().load().unwrap_or_default());
+    let settings = SettingsStore::default().load().unwrap_or_default();
     let message = match codex_plus_core::cli_wrapper::ensure_cli_wrapper(&settings) {
         Ok(Some(install)) => format!(
             "后端已修复，命令包装器已指向 {}。",
@@ -1438,6 +1383,80 @@ pub fn save_relay_file(request: SaveRelayFileRequest) -> CommandResult<RelayFile
                 auth_contents: String::new(),
             }),
         ),
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayProfileSwitchRequest {
+    pub settings: BackendSettings,
+    #[serde(default)]
+    pub previous_active_relay_id: String,
+}
+
+#[tauri::command]
+pub fn switch_relay_profile(
+    request: RelayProfileSwitchRequest,
+) -> CommandResult<RelaySwitchPayload> {
+    let Ok(_guard) = relay_switch_mutex().lock() else {
+        let status = codex_plus_core::relay_config::default_relay_status();
+        return failed(
+            "供应商切换锁已损坏，请重启管理器后再试。",
+            relay_switch_payload(
+                SettingsStore::default().load().unwrap_or_default(),
+                status,
+                None,
+            ),
+        );
+    };
+    let home = codex_plus_core::relay_config::default_codex_home_dir();
+    let store = SettingsStore::default();
+    let previous_active_relay_id = request.previous_active_relay_id;
+    let settings = normalize_settings_before_save(request.settings);
+    log_manager_event(
+        "manager.switch_relay_profile.start",
+        json!({
+            "previousActiveRelayId": previous_active_relay_id,
+            "targetRelayId": settings.active_relay_id
+        }),
+    );
+    match codex_plus_core::relay_switch::switch_relay_profile_in_home(
+        &store,
+        &home,
+        settings,
+        &previous_active_relay_id,
+    ) {
+        Ok(result) => {
+            let status = codex_plus_core::relay_config::relay_status_from_home(&home);
+            log_manager_event(
+                "manager.switch_relay_profile.ok",
+                json!({
+                    "targetRelayId": result.settings.active_relay_id,
+                    "configured": status.configured,
+                    "backupPath": result.backup_path.as_ref()
+                }),
+            );
+            ok(
+                "供应商已切换。",
+                relay_switch_payload(result.settings, status, result.backup_path),
+            )
+        }
+        Err(error) => {
+            let status = codex_plus_core::relay_config::relay_status_from_home(&home);
+            let settings = store.load().unwrap_or_default();
+            log_manager_event(
+                "manager.switch_relay_profile.failed",
+                json!({
+                    "previousActiveRelayId": previous_active_relay_id,
+                    "activeRelayId": settings.active_relay_id,
+                    "error": error.to_string()
+                }),
+            );
+            failed(
+                &format!("供应商切换失败：{error}"),
+                relay_switch_payload(settings, status, None),
+            )
+        }
     }
 }
 
@@ -1746,8 +1765,7 @@ pub async fn test_relay_profile(profile: RelayProfile) -> CommandResult<RelayPro
     } else {
         profile.name.trim()
     };
-    let settings =
-        settings_with_live_ccs_profiles(SettingsStore::default().load().unwrap_or_default());
+    let settings = SettingsStore::default().load().unwrap_or_default();
     let test_model: String = if !profile.test_model.trim().is_empty() {
         // 1. 使用者在該供應商明確填的測試模型
         profile.test_model.trim().to_string()
@@ -1825,8 +1843,7 @@ pub async fn fetch_relay_profile_models(
 #[tauri::command]
 pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let settings =
-        settings_with_live_ccs_profiles(SettingsStore::default().load().unwrap_or_default());
+    let settings = SettingsStore::default().load().unwrap_or_default();
     if !settings.relay_profiles_enabled {
         let status = codex_plus_core::relay_config::relay_status_from_home(&home);
         return failed(
@@ -1836,17 +1853,12 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     }
     let relay = settings.active_relay_profile();
     log_relay_apply_request("manager.apply_relay_injection", &settings, &relay);
-    if let Some(result) = try_apply_linked_ccs_provider(&settings, &relay) {
-        return result;
-    }
-    if let Some(result) = guard_live_write_or_fail(&settings, false) {
-        return result;
-    }
     if relay_has_complete_files(&relay) {
-        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules(
+        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
             &home,
             &relay,
             &relay_combined_common_config(&settings),
+            settings.computer_use_guard_enabled,
         ) {
             Ok(result) => {
                 let status = codex_plus_core::relay_config::relay_status_from_home(&home);
@@ -1936,8 +1948,7 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
 #[tauri::command]
 pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let settings =
-        settings_with_live_ccs_profiles(SettingsStore::default().load().unwrap_or_default());
+    let settings = SettingsStore::default().load().unwrap_or_default();
     if !settings.relay_profiles_enabled {
         let status = codex_plus_core::relay_config::relay_status_from_home(&home);
         return failed(
@@ -1946,18 +1957,13 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
         );
     }
     let relay = settings.active_relay_profile();
-    if let Some(result) = try_apply_linked_ccs_provider(&settings, &relay) {
-        return result;
-    }
-    if let Some(result) = guard_live_write_or_fail(&settings, false) {
-        return result;
-    }
     log_relay_apply_request("manager.apply_pure_api_injection", &settings, &relay);
     if relay_has_complete_files(&relay) {
-        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules(
+        return match codex_plus_core::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
             &home,
             &relay,
             &relay_combined_common_config(&settings),
+            settings.computer_use_guard_enabled,
         ) {
             Ok(result) => {
                 let status = codex_plus_core::relay_config::relay_status_from_home(&home);
@@ -2043,16 +2049,9 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
 #[tauri::command]
 pub fn clear_relay_injection() -> CommandResult<RelayPayload> {
     let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let settings =
-        settings_with_live_ccs_profiles(SettingsStore::default().load().unwrap_or_default());
+    let settings = SettingsStore::default().load().unwrap_or_default();
     let relay = settings.active_relay_profile();
     log_manager_event("manager.clear_relay_injection.start", json!({}));
-    if let Some(result) = try_apply_linked_ccs_provider(&settings, &relay) {
-        return result;
-    }
-    if let Some(result) = guard_live_write_or_fail(&settings, false) {
-        return result;
-    }
     let auth_contents = (relay.relay_mode == codex_plus_core::settings::RelayMode::Official
         && !relay.official_mix_api_key
         && !relay.auth_contents.trim().is_empty())
@@ -2088,64 +2087,6 @@ pub fn clear_relay_injection() -> CommandResult<RelayPayload> {
             )
         }
     }
-}
-
-fn try_apply_linked_ccs_provider(
-    settings: &BackendSettings,
-    relay: &codex_plus_core::settings::RelayProfile,
-) -> Option<CommandResult<RelayPayload>> {
-    if !settings.ccs_link_enabled {
-        return None;
-    }
-    if codex_plus_core::config_coordinator::effective_ownership(settings)
-        != codex_plus_core::settings::ConfigOwnership::CcSwitch
-    {
-        return None;
-    }
-    let source_id = relay.linked_ccs_provider_id.trim();
-    if source_id.is_empty() {
-        return None;
-    }
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    match codex_plus_core::config_coordinator::apply_linked_ccs_provider_to_home(
-        source_id,
-        &relay_combined_common_config(settings),
-    ) {
-        Ok(result) => {
-            let status = codex_plus_core::relay_config::relay_status_from_home(&home);
-            log_relay_apply_result(
-                "manager.apply_relay_injection.ccswitch_coordinated",
-                relay,
-                &status,
-                result.backup_path.as_ref(),
-                None,
-            );
-            Some(ok(
-                "已通过 cc-switch 联动应用当前供应商配置，避免与 CC Switch 发生覆盖冲突。",
-                relay_payload(status, result.backup_path),
-            ))
-        }
-        Err(error) => {
-            let status = codex_plus_core::relay_config::relay_status_from_home(&home);
-            Some(failed(
-                &format!("通过 cc-switch 联动应用供应商失败：{error}"),
-                relay_payload(status, None),
-            ))
-        }
-    }
-}
-
-fn guard_live_write_or_fail(
-    settings: &BackendSettings,
-    force: bool,
-) -> Option<CommandResult<RelayPayload>> {
-    let decision = codex_plus_core::config_coordinator::evaluate_live_write(settings, force);
-    if decision.allowed {
-        return None;
-    }
-    let home = codex_plus_core::relay_config::default_codex_home_dir();
-    let status = codex_plus_core::relay_config::relay_status_from_home(&home);
-    Some(failed(&decision.message, relay_payload(status, None)))
 }
 
 fn relay_has_complete_files(relay: &codex_plus_core::settings::RelayProfile) -> bool {
@@ -2254,6 +2195,26 @@ fn relay_payload(
     }
 }
 
+fn relay_switch_payload(
+    settings: BackendSettings,
+    status: codex_plus_core::relay_config::RelayStatus,
+    backup_path: Option<String>,
+) -> RelaySwitchPayload {
+    RelaySwitchPayload {
+        settings,
+        relay: relay_payload(status, backup_path),
+        settings_path: codex_plus_core::paths::default_settings_path()
+            .to_string_lossy()
+            .to_string(),
+        user_scripts: user_script_inventory(),
+    }
+}
+
+fn relay_switch_mutex() -> &'static Mutex<()> {
+    static RELAY_SWITCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    RELAY_SWITCH_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn empty_context_entries() -> codex_plus_core::relay_config::CodexContextEntries {
     codex_plus_core::relay_config::CodexContextEntries {
         mcp_servers: Vec::new(),
@@ -2338,7 +2299,7 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
         .to_string();
     match store.load() {
         Ok(settings) => Ok(SettingsPayload {
-            settings: settings_with_live_ccs_profiles(settings),
+            settings,
             settings_path,
             user_scripts: user_script_inventory(),
         }),
@@ -2355,9 +2316,7 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
 
 fn fallback_settings_payload() -> SettingsPayload {
     SettingsPayload {
-        settings: settings_with_live_ccs_profiles(
-            SettingsStore::default().load().unwrap_or_default(),
-        ),
+        settings: SettingsStore::default().load().unwrap_or_default(),
         settings_path: codex_plus_core::paths::default_settings_path()
             .to_string_lossy()
             .to_string(),
@@ -2759,6 +2718,159 @@ mod tests {
     }
 
     #[test]
+    fn delete_local_session_falls_back_when_requested_db_no_longer_contains_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let codex_home = temp.path().join("codex-home");
+        let sqlite_dir = codex_home.join("sqlite");
+        std::fs::create_dir_all(&sqlite_dir).unwrap();
+        let stale_db = sqlite_dir.join("codex-dev.db");
+        let active_db = sqlite_dir.join("state_5.sqlite");
+        let rollout_path = temp.path().join("rollout.jsonl");
+        std::fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+        let stale = rusqlite::Connection::open(&stale_db).unwrap();
+        stale
+            .execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, title TEXT)",
+                [],
+            )
+            .unwrap();
+        drop(stale);
+        let active = rusqlite::Connection::open(&active_db).unwrap();
+        active
+            .execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, title TEXT)",
+                [],
+            )
+            .unwrap();
+        active
+            .execute(
+                "INSERT INTO threads VALUES ('t1', ?1, 'Active Thread')",
+                [rollout_path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        drop(active);
+
+        unsafe {
+            std::env::set_var("CODEX_HOME", &codex_home);
+        }
+        let result = delete_local_session(DeleteLocalSessionRequest {
+            session_id: "t1".to_string(),
+            title: "Active Thread".to_string(),
+            db_path: Some(stale_db.to_string_lossy().to_string()),
+        });
+        unsafe {
+            if let Some(value) = previous_codex_home {
+                std::env::set_var("CODEX_HOME", value);
+            } else {
+                std::env::remove_var("CODEX_HOME");
+            }
+        }
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(
+            result.payload.status,
+            codex_plus_core::models::DeleteStatus::LocalDeleted
+        );
+        let active = rusqlite::Connection::open(&active_db).unwrap();
+        assert_eq!(
+            active
+                .query_row("SELECT COUNT(*) FROM threads WHERE id = 't1'", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn list_local_sessions_deduplicates_threads_across_current_and_legacy_dbs() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let codex_home = temp.path().join("codex-home");
+        let sqlite_dir = codex_home.join("sqlite");
+        std::fs::create_dir_all(&sqlite_dir).unwrap();
+        let current_db = sqlite_dir.join("state_5.sqlite");
+        let legacy_db = codex_home.join("state_5.sqlite");
+        create_minimal_thread_db(&current_db, "t1", "Current Copy", 100);
+        create_minimal_thread_db(&legacy_db, "t1", "Legacy Copy", 200);
+
+        unsafe {
+            std::env::set_var("CODEX_HOME", &codex_home);
+        }
+        let result = list_local_sessions();
+        restore_codex_home(previous_codex_home);
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.payload.sessions.len(), 1);
+        assert_eq!(result.payload.sessions[0].id, "t1");
+        assert_eq!(result.payload.sessions[0].title, "Legacy Copy");
+        assert_eq!(
+            result.payload.sessions[0].db_path,
+            legacy_db.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn delete_local_session_removes_duplicate_threads_from_all_candidate_dbs() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let codex_home = temp.path().join("codex-home");
+        let sqlite_dir = codex_home.join("sqlite");
+        std::fs::create_dir_all(&sqlite_dir).unwrap();
+        let current_db = sqlite_dir.join("state_5.sqlite");
+        let legacy_db = codex_home.join("state_5.sqlite");
+        create_minimal_thread_db(&current_db, "t1", "Current Copy", 100);
+        create_minimal_thread_db(&legacy_db, "t1", "Legacy Copy", 200);
+
+        unsafe {
+            std::env::set_var("CODEX_HOME", &codex_home);
+        }
+        let result = delete_local_session(DeleteLocalSessionRequest {
+            session_id: "t1".to_string(),
+            title: "Legacy Copy".to_string(),
+            db_path: Some(legacy_db.to_string_lossy().to_string()),
+        });
+        restore_codex_home(previous_codex_home);
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(thread_count(&current_db, "t1"), 0);
+        assert_eq!(thread_count(&legacy_db, "t1"), 0);
+    }
+
+    fn create_minimal_thread_db(path: &Path, id: &str, title: &str, updated_at_ms: i64) {
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, title TEXT, updated_at_ms INTEGER)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO threads VALUES (?1, '', ?2, ?3)",
+            (id, title, updated_at_ms),
+        )
+        .unwrap();
+    }
+
+    fn thread_count(path: &Path, id: &str) -> i64 {
+        let db = rusqlite::Connection::open(path).unwrap();
+        db.query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    }
+
+    fn restore_codex_home(previous: Option<std::ffi::OsString>) {
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var("CODEX_HOME", value);
+            } else {
+                std::env::remove_var("CODEX_HOME");
+            }
+        }
+    }
+
+    #[test]
     fn apply_relay_profile_to_home_with_switch_rules_preserves_custom_provider_id() {
         let temp = tempfile::tempdir().unwrap();
         let profile = RelayProfile {
@@ -2861,34 +2973,6 @@ mod tests {
             serde_json::json!({"auth_mode":"chatgpt","tokens":{"access_token":"edited"}})
         );
         assert!(normalized.relay_profiles[0].config_contents.is_empty());
-    }
-
-    #[test]
-    fn remove_linked_ccs_profiles_for_local_storage_drops_external_profiles() {
-        let mut settings = BackendSettings {
-            ccs_link_enabled: true,
-            active_relay_id: "ccs-one".to_string(),
-            relay_profiles: vec![
-                RelayProfile {
-                    id: "local".to_string(),
-                    name: "Local".to_string(),
-                    ..RelayProfile::default()
-                },
-                RelayProfile {
-                    id: "ccs-one".to_string(),
-                    linked_ccs_provider_id: "provider-one".to_string(),
-                    name: "External".to_string(),
-                    ..RelayProfile::default()
-                },
-            ],
-            ..BackendSettings::default()
-        };
-
-        remove_linked_ccs_profiles_for_local_storage(&mut settings);
-
-        assert_eq!(settings.relay_profiles.len(), 1);
-        assert_eq!(settings.relay_profiles[0].id, "local");
-        assert_eq!(settings.active_relay_id, "ccs-one");
     }
 
     #[test]

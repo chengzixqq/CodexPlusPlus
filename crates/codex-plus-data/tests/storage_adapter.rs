@@ -1,5 +1,5 @@
 use codex_plus_core::models::{DeleteStatus, SessionRef};
-use codex_plus_data::{BackupStore, SQLiteStorageAdapter};
+use codex_plus_data::{BackupStore, SQLiteStorageAdapter, delete_local_from_paths};
 use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
@@ -81,6 +81,14 @@ fn create_codex_thread_db(path: &Path, rollout_path: &Path) {
         [],
     )
     .unwrap();
+}
+
+fn thread_count(path: &Path, id: &str) -> i64 {
+    let db = Connection::open(path).unwrap();
+    db.query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
+        row.get::<_, i64>(0)
+    })
+    .unwrap()
 }
 
 #[test]
@@ -373,6 +381,32 @@ fn delete_codex_thread_schema_removes_related_rows_file_and_undo_restores_everyt
 }
 
 #[test]
+fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
+    let tmp = tempdir().unwrap();
+    let first_db = tmp.path().join("first.sqlite");
+    let second_db = tmp.path().join("second.sqlite");
+    let first_rollout = tmp.path().join("first.jsonl");
+    let second_rollout = tmp.path().join("second.jsonl");
+    fs::write(&first_rollout, "{\"type\":\"message\"}\n").unwrap();
+    fs::write(&second_rollout, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&first_db, &first_rollout);
+    create_codex_thread_db(&second_db, &second_rollout);
+
+    let result = delete_local_from_paths(
+        vec![first_db.clone(), second_db.clone()],
+        BackupStore::new(tmp.path().join("backups")),
+        &session("t1", "Codex Thread"),
+    );
+
+    assert_eq!(result.status, DeleteStatus::LocalDeleted);
+    assert_eq!(result.message, "已从 2 个本地存储删除");
+    assert_eq!(thread_count(&first_db, "t1"), 0);
+    assert_eq!(thread_count(&second_db, "t1"), 0);
+    assert!(!first_rollout.exists());
+    assert!(!second_rollout.exists());
+}
+
+#[test]
 fn list_local_sessions_reads_codex_threads_ordered_by_update_time() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
@@ -404,6 +438,95 @@ fn list_local_sessions_reads_codex_threads_ordered_by_update_time() {
     assert_eq!(sessions[0].model_provider, "custom");
     assert!(sessions[0].archived);
     assert_eq!(sessions[1].id, "t1");
+}
+
+#[test]
+fn list_local_sessions_reads_codex_automation_runs_schema() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("codex-dev.db");
+    let backup = BackupStore::new(tmp.path().join("backups"));
+    let adapter = SQLiteStorageAdapter::new(&db_path, backup);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute(
+        "CREATE TABLE automation_runs (
+            thread_id TEXT PRIMARY KEY,
+            status TEXT,
+            thread_title TEXT,
+            source_cwd TEXT,
+            created_at INTEGER,
+            updated_at INTEGER
+        )",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO automation_runs VALUES ('t1', 'running', 'First', 'C:/a', 100, 200)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO automation_runs VALUES ('t2', 'archived', 'Second', 'C:/b', 300, 400)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let sessions = adapter.list_local_sessions().unwrap();
+
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].id, "t2");
+    assert_eq!(sessions[0].title, "Second");
+    assert_eq!(sessions[0].cwd, "C:/b");
+    assert!(sessions[0].archived);
+    assert_eq!(sessions[0].db_path, db_path.to_string_lossy());
+    assert_eq!(sessions[1].id, "t1");
+}
+
+#[test]
+fn delete_local_session_removes_codex_automation_run_and_inbox_items() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("codex-dev.db");
+    let backup = BackupStore::new(tmp.path().join("backups"));
+    let adapter = SQLiteStorageAdapter::new(&db_path, backup);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute(
+        "CREATE TABLE automation_runs (thread_id TEXT PRIMARY KEY, thread_title TEXT)",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "CREATE TABLE inbox_items (id TEXT PRIMARY KEY, thread_id TEXT, title TEXT)",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO automation_runs VALUES ('t1', 'First')", [])
+        .unwrap();
+    db.execute("INSERT INTO inbox_items VALUES ('i1', 't1', 'Inbox')", [])
+        .unwrap();
+    drop(db);
+
+    let result = adapter.delete_local(&session("t1", "First"));
+
+    assert_eq!(result.status, DeleteStatus::LocalDeleted);
+    let db = Connection::open(&db_path).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM automation_runs WHERE thread_id = 't1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM inbox_items WHERE thread_id = 't1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
 }
 
 #[test]

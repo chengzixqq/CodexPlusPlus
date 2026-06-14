@@ -735,7 +735,6 @@ fn update_codex_config(home: &Path) -> anyhow::Result<(bool, Option<String>)> {
     }
     let backup = backup_config_if_exists(home, &config_path)?;
     crate::settings::atomic_write(&config_path, updated.as_bytes())?;
-    let _ = crate::config_coordinator::record_write_marker("codexplusplus", home);
     Ok((true, backup))
 }
 

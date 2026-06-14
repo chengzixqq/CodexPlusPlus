@@ -1,7 +1,9 @@
+use codex_plus_core::codex_sqlite::codex_session_db_path_from_home;
 use codex_plus_core::relay_config::{
     apply_pure_api_config_to_home, apply_relay_config_file_to_home, apply_relay_config_to_home,
     apply_relay_files_to_home, apply_relay_files_to_home_with_common,
     apply_relay_profile_files_to_home_with_context, apply_relay_profile_to_home_with_switch_rules,
+    apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard,
     backfill_relay_profile_from_home, backfill_relay_profile_from_home_with_common,
     chatgpt_auth_status_from_home, clear_relay_config_to_home,
     clear_relay_config_to_home_with_auth, delete_context_entry_from_common_config,
@@ -12,6 +14,61 @@ use codex_plus_core::relay_config::{
     sync_live_config_context_entries, upsert_context_entry_in_common_config,
 };
 use codex_plus_core::settings::{RelayContextSelection, RelayMode, RelayProfile, RelayProtocol};
+
+#[test]
+fn codex_session_db_path_prefers_new_sqlite_directory_threads_db() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let sqlite_dir = home.join("sqlite");
+    std::fs::create_dir(&sqlite_dir).unwrap();
+    std::fs::write(home.join("state_5.sqlite"), b"legacy").unwrap();
+
+    let ignored = rusqlite::Connection::open(sqlite_dir.join("other.db")).unwrap();
+    ignored
+        .execute("CREATE TABLE metadata (id TEXT PRIMARY KEY)", [])
+        .unwrap();
+    drop(ignored);
+
+    let selected_path = sqlite_dir.join("codex-dev.db");
+    let selected = rusqlite::Connection::open(&selected_path).unwrap();
+    selected
+        .execute("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT)", [])
+        .unwrap();
+    drop(selected);
+
+    assert_eq!(codex_session_db_path_from_home(home), selected_path);
+}
+
+#[test]
+fn codex_session_db_path_accepts_new_automation_runs_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let sqlite_dir = home.join("sqlite");
+    std::fs::create_dir(&sqlite_dir).unwrap();
+
+    let selected_path = sqlite_dir.join("codex-dev.db");
+    let selected = rusqlite::Connection::open(&selected_path).unwrap();
+    selected
+        .execute(
+            "CREATE TABLE automation_runs (thread_id TEXT PRIMARY KEY)",
+            [],
+        )
+        .unwrap();
+    drop(selected);
+
+    assert_eq!(codex_session_db_path_from_home(home), selected_path);
+}
+
+#[test]
+fn codex_session_db_path_falls_back_to_legacy_state_db() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+
+    assert_eq!(
+        codex_session_db_path_from_home(home),
+        home.join("state_5.sqlite")
+    );
+}
 
 #[test]
 fn detects_chatgpt_login_from_auth_json_and_config_provider() {
@@ -526,7 +583,7 @@ enabled = true
 
     assert!(updated.contains("[mcp_servers.ida-pro-mcp]"));
     assert!(updated.contains(r#"command = "python""#));
-    assert!(!updated.contains("[plugins.\"browser@openai-bundled\"]"));
+    assert!(updated.contains("[plugins.\"browser@openai-bundled\"]"));
 }
 
 #[test]
@@ -582,7 +639,7 @@ enabled = true
 }
 
 #[test]
-fn global_common_config_is_not_filtered_by_supplier_selection() {
+fn global_common_config_filters_context_by_supplier_selection() {
     let filtered = filter_common_config_for_selection(
         r#"disable_response_storage = true
 
@@ -612,9 +669,9 @@ path = "plugin.js"
     assert!(filtered.contains("disable_response_storage = true"));
     assert!(filtered.contains("[features]"));
     assert!(filtered.contains("goals = true"));
-    assert!(filtered.contains("[mcp_servers.context7]"));
+    assert!(!filtered.contains("[mcp_servers.context7]"));
     assert!(filtered.contains("[mcp_servers.memory]"));
-    assert!(filtered.contains("[skills.writer]"));
+    assert!(!filtered.contains("[skills.writer]"));
     assert!(filtered.contains("[plugins.local]"));
 }
 
@@ -765,7 +822,7 @@ path = "plugin.js"
 }
 
 #[test]
-fn apply_relay_files_with_context_selection_writes_all_global_context() {
+fn apply_relay_files_with_context_selection_writes_only_selected_global_context() {
     let temp = tempfile::tempdir().unwrap();
     let selection = RelayContextSelection {
         mcp_servers: vec!["memory".to_string()],
@@ -804,8 +861,8 @@ path = "plugin.js"
 
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(config.contains("[mcp_servers.memory]"));
-    assert!(config.contains("[mcp_servers.context7]"));
-    assert!(config.contains("[skills.writer]"));
+    assert!(!config.contains("[mcp_servers.context7]"));
+    assert!(!config.contains("[skills.writer]"));
     assert!(config.contains("[plugins.local]"));
     assert!(config.contains("model_context_window = 200000"));
     assert!(config.contains("model_auto_compact_token_limit = 160000"));
@@ -814,7 +871,11 @@ path = "plugin.js"
 #[test]
 fn apply_relay_files_with_context_skips_disabled_global_context() {
     let temp = tempfile::tempdir().unwrap();
-    let selection = RelayContextSelection::default();
+    let selection = RelayContextSelection {
+        mcp_servers: vec!["enabled_one".to_string()],
+        skills: vec!["disabled_skill".to_string()],
+        plugins: vec!["disabled_one".to_string(), "enabled_two".to_string()],
+    };
 
     codex_plus_core::relay_config::apply_relay_files_to_home_with_context(
         temp.path(),
@@ -1929,7 +1990,8 @@ requires_openai_auth = true
 experimental_bearer_token = "22222222222222222222222222222222222"
 "#
         .to_string(),
-        auth_contents: r#"{"auth_mode":"chatgpt","tokens":{"access_token":"official"}}"#.to_string(),
+        auth_contents: r#"{"auth_mode":"chatgpt","tokens":{"access_token":"official"}}"#
+            .to_string(),
         ..RelayProfile::default()
     };
     let mut common = String::new();
@@ -1940,9 +2002,11 @@ experimental_bearer_token = "22222222222222222222222222222222222"
     assert_eq!(profile.relay_mode, RelayMode::Official);
     assert!(profile.official_mix_api_key);
     assert_eq!(profile.api_key, "333333333333333333333");
-    assert!(profile
-        .config_contents
-        .contains(r#"experimental_bearer_token = "333333333333333333333""#));
+    assert!(
+        profile
+            .config_contents
+            .contains(r#"experimental_bearer_token = "333333333333333333333""#)
+    );
     assert!(!profile.auth_contents.contains("OPENAI_API_KEY"));
 }
 
@@ -2059,6 +2123,283 @@ requires_openai_auth = true
     assert!(config.contains(r#"base_url = "https://max2.jojocode.com/v1""#));
     assert!(!config.contains("experimental_bearer_token"));
     assert!(!config.contains("[model_providers.custom]"));
+}
+
+#[cfg(windows)]
+#[test]
+fn apply_relay_profile_to_home_with_switch_rules_does_not_preserve_computer_use_guard_config_by_default()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let helper = temp
+        .path()
+        .join("plugins")
+        .join("cache")
+        .join("openai-bundled")
+        .join("computer-use")
+        .join("26.608.12217")
+        .join("node_modules")
+        .join("@oai")
+        .join("sky")
+        .join("bin")
+        .join("windows")
+        .join("codex-computer-use.exe");
+    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    std::fs::write(&helper, "").unwrap();
+    let profile = RelayProfile {
+        id: "relay-a".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model_provider = "max_ai"
+model = "gpt-5.4"
+
+[features]
+js_repl = false
+
+[model_providers.max_ai]
+name = "max_ai"
+base_url = "https://max2.jojocode.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("js_repl = false"));
+    assert!(!config.contains("[plugins.\"browser@openai-bundled\"]"));
+    assert!(!config.contains("[plugins.\"chrome@openai-bundled\"]"));
+    assert!(!config.contains("[plugins.\"computer-use@openai-bundled\"]"));
+    assert!(!config.contains(r#"notify = ["#));
+    assert!(!config.contains("codex-computer-use.exe"));
+}
+
+#[cfg(windows)]
+#[test]
+fn apply_relay_profile_to_home_with_switch_rules_preserves_computer_use_guard_config_when_enabled()
+{
+    let temp = tempfile::tempdir().unwrap();
+    let helper = temp
+        .path()
+        .join("plugins")
+        .join("cache")
+        .join("openai-bundled")
+        .join("computer-use")
+        .join("26.608.12217")
+        .join("node_modules")
+        .join("@oai")
+        .join("sky")
+        .join("bin")
+        .join("windows")
+        .join("codex-computer-use.exe");
+    std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+    std::fs::write(&helper, "").unwrap();
+    let profile = RelayProfile {
+        id: "relay-a".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model_provider = "max_ai"
+model = "gpt-5.4"
+
+[features]
+js_repl = false
+
+[model_providers.max_ai]
+name = "max_ai"
+base_url = "https://max2.jojocode.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
+        temp.path(),
+        &profile,
+        "",
+        true,
+    )
+    .unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("js_repl = true"));
+    assert!(config.contains("[plugins.\"browser@openai-bundled\"]"));
+    assert!(config.contains("[plugins.\"chrome@openai-bundled\"]"));
+    assert!(config.contains("[plugins.\"computer-use@openai-bundled\"]"));
+    assert!(config.contains(r#"notify = ["#));
+    assert!(config.contains("codex-computer-use.exe"));
+}
+
+#[test]
+fn apply_relay_profile_to_home_with_switch_rules_preserves_unmanaged_live_context_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model = "old"
+
+[mcp_servers.manual]
+command = "manual-command"
+
+[plugins.manual]
+enabled = true
+"#,
+    )
+    .unwrap();
+    let profile = RelayProfile {
+        id: "relay-a".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model = "gpt-5.5"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+    let common = r#"[mcp_servers.managed]
+command = "managed-command"
+"#;
+
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, common).unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("[mcp_servers.manual]"));
+    assert!(config.contains(r#"command = "manual-command""#));
+    assert!(config.contains("[plugins.manual]"));
+    assert!(config.contains("[mcp_servers.managed]"));
+    assert!(config.contains(r#"command = "managed-command""#));
+}
+
+#[test]
+fn apply_relay_profile_to_home_with_switch_rules_does_not_preserve_unselected_managed_context_entries()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model = "old"
+
+[mcp_servers.manual]
+command = "manual-command"
+
+[mcp_servers.managed]
+command = "old-managed"
+"#,
+    )
+    .unwrap();
+    let profile = RelayProfile {
+        id: "relay-a".to_string(),
+        relay_mode: RelayMode::PureApi,
+        context_selection_initialized: true,
+        context_selection: RelayContextSelection::default(),
+        config_contents: r#"model = "gpt-5.5"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+    let common = r#"[mcp_servers.managed]
+command = "managed-command"
+"#;
+
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, common).unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("[mcp_servers.manual]"));
+    assert!(!config.contains("[mcp_servers.managed]"));
+}
+
+#[test]
+fn filter_common_config_for_selection_writes_only_selected_context_entries() {
+    let common = r#"model_reasoning_effort = "high"
+
+[mcp_servers.keep]
+command = "keep"
+
+[mcp_servers.skip]
+command = "skip"
+
+[skills.writer]
+enabled = true
+
+[plugins.browser]
+enabled = true
+"#;
+    let selection = RelayContextSelection {
+        mcp_servers: vec!["keep".to_string()],
+        skills: Vec::new(),
+        plugins: vec!["browser".to_string()],
+    };
+
+    let filtered = filter_common_config_for_selection(common, &selection).unwrap();
+
+    assert!(filtered.contains("model_reasoning_effort"));
+    assert!(filtered.contains("[mcp_servers.keep]"));
+    assert!(!filtered.contains("[mcp_servers.skip]"));
+    assert!(!filtered.contains("[skills.writer]"));
+    assert!(filtered.contains("[plugins.browser]"));
+}
+
+#[test]
+fn sync_live_config_context_entries_preserves_unmanaged_live_entries() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.manual]
+command = "manual"
+
+[mcp_servers.managed]
+command = "old"
+"#;
+    let context = r#"[mcp_servers.managed]
+command = "new"
+
+[mcp_servers.disabled]
+enabled = false
+command = "disabled"
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(updated.contains("[mcp_servers.manual]"));
+    assert!(updated.contains(r#"command = "manual""#));
+    assert!(updated.contains("[mcp_servers.managed]"));
+    assert!(updated.contains(r#"command = "new""#));
+    assert!(!updated.contains("[mcp_servers.disabled]"));
+}
+
+#[test]
+fn sync_live_config_context_entries_removes_disabled_managed_entries_from_live() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.manual]
+command = "manual"
+
+[mcp_servers.managed]
+command = "old"
+"#;
+    let context = r#"[mcp_servers.managed]
+enabled = false
+command = "old"
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(updated.contains("[mcp_servers.manual]"));
+    assert!(!updated.contains("[mcp_servers.managed]"));
 }
 
 #[test]
