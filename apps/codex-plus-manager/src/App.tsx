@@ -1089,6 +1089,15 @@ export function App() {
     }
   };
 
+  const resetImageOverlaySettings = async () => {
+    const result = await run(() => call<SettingsResult>("reset_image_overlay_settings"));
+    if (result) {
+      setSettings(result);
+      setSettingsForm(normalizeSettings(result.settings));
+      showNotice("图片覆盖层", result.message, result.status);
+    }
+  };
+
   const refreshAds = async (silent = false) => {
     const result = await run(() => call<AdsResult>("load_ads"));
     if (result) {
@@ -1480,6 +1489,7 @@ export function App() {
       saveSettingsValue,
       refreshSettings,
       resetSettings,
+      resetImageOverlaySettings,
       chooseCodexAppPath: async (mode: "folder" | "file") => {
         let selected: unknown;
         try {
@@ -1772,6 +1782,7 @@ type Actions = {
   saveSettingsValue: (settings: BackendSettings, silent?: boolean) => Promise<void>;
   refreshSettings: (silent?: boolean) => Promise<BackendSettings | null>;
   resetSettings: () => Promise<void>;
+  resetImageOverlaySettings: () => Promise<void>;
   chooseCodexAppPath: (mode: "folder" | "file") => Promise<void>;
   clearCodexAppPath: () => Promise<void>;
   chooseImageOverlayPath: () => Promise<void>;
@@ -2784,8 +2795,8 @@ function SettingsScreen({
           </div>
           <Toolbar>
             <Button onClick={() => void actions.saveSettings()}>保存设置</Button>
-            <Button variant="secondary" onClick={() => void actions.resetSettings()}>
-              重置设置
+            <Button variant="secondary" onClick={() => void actions.resetImageOverlaySettings()}>
+              重置背景
             </Button>
           </Toolbar>
         </CardContent>
