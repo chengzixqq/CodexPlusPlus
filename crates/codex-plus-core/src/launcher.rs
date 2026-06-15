@@ -505,6 +505,9 @@ impl LaunchHooks for DefaultLaunchHooks {
                     unreachable!();
                 };
                 let app_user_model_id_for_log = app_user_model_id.clone();
+                let preexisting_codex_process_ids = crate::watcher::find_codex_processes()
+                    .into_iter()
+                    .collect::<HashSet<_>>();
                 let preexisting_cdp_targets = query_cdp_targets(debug_port).await;
                 let preexisting_cdp_target_ids = cdp_target_fingerprints(&preexisting_cdp_targets);
                 if preexisting_cdp_targets.iter().any(is_codex_cdp_target) {
@@ -551,9 +554,16 @@ impl LaunchHooks for DefaultLaunchHooks {
                         "debug_port": debug_port,
                         "app_user_model_id": app_user_model_id_for_log,
                         "process_id": process_id,
+                        "process_was_preexisting": preexisting_codex_process_ids.contains(&process_id),
                         "preexisting_cdp_target_count": preexisting_cdp_targets.len()
                     }),
                 );
+                if keep_packaged_activation_after_cdp_unready(
+                    process_id,
+                    &preexisting_codex_process_ids,
+                ) {
+                    return Ok(packaged_launch);
+                }
                 let _ = terminate_windows_process_id(process_id).await;
             }
         }
@@ -1409,6 +1419,13 @@ fn cdp_target_fingerprints(targets: &[crate::cdp::CdpTarget]) -> HashSet<String>
     targets.iter().map(cdp_target_fingerprint).collect()
 }
 
+fn keep_packaged_activation_after_cdp_unready(
+    process_id: u32,
+    preexisting_process_ids: &HashSet<u32>,
+) -> bool {
+    preexisting_process_ids.contains(&process_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CdpTargetReadiness {
     Ready,
@@ -2080,6 +2097,21 @@ mod tests {
             cdp_target_readiness(&target, &preexisting),
             CdpTargetReadiness::Preexisting
         );
+    }
+
+    #[test]
+    fn packaged_activation_cdp_unready_keeps_preexisting_codex_process() {
+        let mut preexisting = HashSet::new();
+        preexisting.insert(4242);
+
+        assert!(keep_packaged_activation_after_cdp_unready(
+            4242,
+            &preexisting
+        ));
+        assert!(!keep_packaged_activation_after_cdp_unready(
+            5252,
+            &preexisting
+        ));
     }
 
     #[test]
