@@ -837,6 +837,36 @@ async fn launch_lifecycle_enters_degraded_mode_and_retries_when_injection_fails(
 }
 
 #[tokio::test]
+async fn launch_lifecycle_writes_starting_status_before_injection() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("Codex.app");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    let status_path = temp.path().join("latest-status.json");
+    let status_store = StatusStore::new(status_path.clone());
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hooks = FakeHooks::new(events.clone()).with_status_snapshot_path(status_path);
+
+    let _handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(app_dir),
+            debug_port: 43001,
+            helper_port: 44001,
+            status_store,
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .contains(&"status-snapshot:starting:43001".to_string())
+    );
+}
+
+#[tokio::test]
 async fn launch_lifecycle_cleans_helper_when_launch_fails_after_helper_started() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
@@ -1077,6 +1107,7 @@ struct FakeHooks {
     launch_error: Option<String>,
     inject_error: Option<String>,
     provider_sync_unsupported: bool,
+    status_snapshot_path: Option<PathBuf>,
 }
 
 impl FakeHooks {
@@ -1092,6 +1123,7 @@ impl FakeHooks {
             launch_error: None,
             inject_error: None,
             provider_sync_unsupported: false,
+            status_snapshot_path: None,
         }
     }
 
@@ -1117,6 +1149,11 @@ impl FakeHooks {
 
     fn with_provider_sync_unsupported(mut self) -> Self {
         self.provider_sync_unsupported = true;
+        self
+    }
+
+    fn with_status_snapshot_path(mut self, path: PathBuf) -> Self {
+        self.status_snapshot_path = Some(path);
         self
     }
 
@@ -1202,6 +1239,17 @@ impl LaunchHooks for FakeHooks {
     }
 
     async fn ensure_injection(&self, debug_port: u16, helper_port: u16, _app_dir: &Path) -> bool {
+        if let Some(path) = &self.status_snapshot_path {
+            let status = StatusStore::new(path.clone())
+                .load_latest()
+                .unwrap()
+                .unwrap();
+            self.event(format!(
+                "status-snapshot:{}:{}",
+                status.status,
+                status.debug_port.unwrap_or_default()
+            ));
+        }
         self.event(format!("inject:{debug_port}:{helper_port}"));
         self.inject_error.is_none()
     }

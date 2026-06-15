@@ -271,6 +271,14 @@ where
             .await?;
         launched = Some(launch.clone());
         keep_launched_on_error = true;
+        let starting = launch_status(
+            "starting",
+            "Codex launched; Codex++ enhancements are starting.",
+            debug_port,
+            helper_port,
+            &app_dir,
+        );
+        let _ = options.status_store.save_latest(&starting);
         if settings.computer_use_guard_enabled {
             hooks.start_computer_use_guard_watchdog(&settings).await?;
         }
